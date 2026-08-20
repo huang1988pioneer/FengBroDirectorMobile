@@ -1,5 +1,7 @@
 package com.fengbro.director.ui
 
+import android.content.Intent
+import android.provider.DocumentsContract
 import android.view.ViewGroup
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -7,14 +9,18 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.aspectRatio
+import androidx.compose.foundation.layout.defaultMinSize
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -24,6 +30,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Redo
@@ -46,6 +53,7 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.ModalBottomSheet
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Slider
 import androidx.compose.material3.SliderDefaults
 import androidx.compose.material3.Switch
@@ -60,6 +68,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
@@ -248,36 +257,46 @@ private fun TimelineBlock(
 
 @Composable
 private fun TopBar(state: EditorUiState, vm: EditorViewModel, editor: Boolean) {
-    Row(
+    BoxWithConstraints(
         modifier = Modifier
             .fillMaxWidth()
-            .background(BgChrome)
-            .padding(horizontal = 12.dp, vertical = 4.dp),
-        verticalAlignment = Alignment.CenterVertically,
+            .background(BgChrome),
     ) {
-        Text("鋒兄導演", color = Ink, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
-        if (editor) {
-            Spacer(Modifier.width(10.dp))
-            Text(state.projectName, color = Muted, fontSize = 12.sp, modifier = Modifier.weight(1f))
-            IconButton(onClick = vm::backToStartup) {
-                Icon(Icons.Default.Home, "開始畫面", tint = Muted)
+        val showProjectName = maxWidth >= 600.dp
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 12.dp, vertical = 4.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text("鋒兄導演", color = Ink, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
+            if (editor) {
+                if (showProjectName) {
+                    Spacer(Modifier.width(10.dp))
+                    Text(state.projectName, color = Muted, fontSize = 12.sp, modifier = Modifier.weight(1f))
+                } else {
+                    Spacer(Modifier.weight(1f))
+                }
+                IconButton(onClick = vm::backToStartup) {
+                    Icon(Icons.Default.Home, "開始畫面", tint = Muted)
+                }
+                IconButton(onClick = vm::undo, enabled = state.canUndo) {
+                    Icon(Icons.AutoMirrored.Filled.Undo, "復原", tint = if (state.canUndo) Ink else Muted)
+                }
+                IconButton(onClick = vm::redo, enabled = state.canRedo) {
+                    Icon(Icons.AutoMirrored.Filled.Redo, "重做", tint = if (state.canRedo) Ink else Muted)
+                }
+                Button(
+                    onClick = { vm.openSheet(EditorSheet.Export) },
+                    colors = ButtonDefaults.buttonColors(containerColor = Primary, contentColor = PrimaryInk),
+                    contentPadding = PaddingValues(horizontal = 16.dp, vertical = 6.dp),
+                    shape = RoundedCornerShape(8.dp),
+                ) {
+                    Text("匯出", fontWeight = FontWeight.SemiBold)
+                }
+            } else {
+                Spacer(Modifier.weight(1f))
             }
-            IconButton(onClick = vm::undo, enabled = state.canUndo) {
-                Icon(Icons.AutoMirrored.Filled.Undo, "復原", tint = if (state.canUndo) Ink else Muted)
-            }
-            IconButton(onClick = vm::redo, enabled = state.canRedo) {
-                Icon(Icons.AutoMirrored.Filled.Redo, "重做", tint = if (state.canRedo) Ink else Muted)
-            }
-            Button(
-                onClick = { vm.openSheet(EditorSheet.Export) },
-                colors = ButtonDefaults.buttonColors(containerColor = Primary, contentColor = PrimaryInk),
-                contentPadding = PaddingValues(horizontal = 16.dp, vertical = 6.dp),
-                shape = RoundedCornerShape(8.dp),
-            ) {
-                Text("匯出", fontWeight = FontWeight.SemiBold)
-            }
-        } else {
-            Spacer(Modifier.weight(1f))
         }
     }
 }
@@ -368,32 +387,58 @@ private fun OverlayCaption(overlay: OverlayState) {
 
 @Composable
 private fun TransportBar(state: EditorUiState, vm: EditorViewModel) {
-    Column(
+    BoxWithConstraints(
         Modifier
             .fillMaxWidth()
             .background(BgChrome)
             .padding(horizontal = 12.dp, vertical = 2.dp),
     ) {
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            IconButton(onClick = { vm.seek((state.playhead - 1).coerceAtLeast(0.0)) }) {
-                Icon(Icons.Default.SkipPrevious, "倒退", tint = Ink)
+        val compact = maxWidth < 480.dp
+        Column(Modifier.fillMaxWidth()) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                IconButton(onClick = { vm.seek((state.playhead - 1).coerceAtLeast(0.0)) }) {
+                    Icon(Icons.Default.SkipPrevious, "倒退", tint = Ink)
+                }
+                IconButton(onClick = vm::togglePlay) {
+                    Icon(if (state.playing) Icons.Default.Pause else Icons.Default.PlayArrow, "播放", tint = Ink)
+                }
+                IconButton(onClick = { vm.seek(state.playhead + 1) }) {
+                    Icon(Icons.Default.SkipNext, "快轉", tint = Ink)
+                }
+                if (!compact) {
+                    Text(state.clock, color = Muted, fontSize = 12.sp, modifier = Modifier.weight(1f))
+                } else {
+                    Spacer(Modifier.weight(1f))
+                }
+                Text("${state.width}×${state.height}", color = Muted, fontSize = 11.sp)
             }
-            IconButton(onClick = vm::togglePlay) {
-                Icon(if (state.playing) Icons.Default.Pause else Icons.Default.PlayArrow, "播放", tint = Ink)
+            if (compact) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(
+                        state.clock,
+                        color = Muted,
+                        fontSize = 10.sp,
+                        maxLines = 1,
+                        modifier = Modifier.width(136.dp),
+                    )
+                    TransportSlider(state, vm, Modifier.weight(1f))
+                }
+            } else {
+                TransportSlider(state, vm, Modifier.fillMaxWidth())
             }
-            IconButton(onClick = { vm.seek(state.playhead + 1) }) {
-                Icon(Icons.Default.SkipNext, "快轉", tint = Ink)
-            }
-            Text(state.clock, color = Muted, fontSize = 12.sp, modifier = Modifier.weight(1f))
-            Text("${state.width}×${state.height}", color = Muted, fontSize = 11.sp)
         }
-        Slider(
-            value = state.playhead.toFloat(),
-            onValueChange = { vm.seek(it.toDouble()) },
-            valueRange = 0f..state.workspaceSeconds.toFloat().coerceAtLeast(1f),
-            colors = SliderDefaults.colors(thumbColor = Primary, activeTrackColor = Primary, inactiveTrackColor = Line),
-        )
     }
+}
+
+@Composable
+private fun TransportSlider(state: EditorUiState, vm: EditorViewModel, modifier: Modifier) {
+    Slider(
+        value = state.playhead.toFloat(),
+        onValueChange = { vm.seek(it.toDouble()) },
+        valueRange = 0f..state.workspaceSeconds.toFloat().coerceAtLeast(1f),
+        colors = SliderDefaults.colors(thumbColor = Primary, activeTrackColor = Primary, inactiveTrackColor = Line),
+        modifier = modifier,
+    )
 }
 
 @Composable
@@ -404,13 +449,15 @@ private fun ToolBar(
     showLibrary: Boolean,
     showInspector: Boolean,
 ) {
+    val scrollState = rememberScrollState()
     Row(
         modifier = Modifier
             .fillMaxWidth()
             .background(BgPanel)
+            .horizontalScroll(scrollState)
             .padding(horizontal = 4.dp, vertical = 2.dp),
         verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.SpaceEvenly,
+        horizontalArrangement = Arrangement.spacedBy(4.dp),
     ) {
         TinyAction("匯入", Icons.Default.FolderOpen, onClick = onImport)
         if (showLibrary) TinyAction("媒體庫", Icons.Default.Add) { vm.openSheet(EditorSheet.Library) }
@@ -433,8 +480,10 @@ private fun TinyAction(
     Column(
         horizontalAlignment = Alignment.CenterHorizontally,
         modifier = Modifier
+            .widthIn(min = 56.dp)
+            .defaultMinSize(minHeight = 56.dp)
             .clickable(enabled = enabled, onClick = onClick)
-            .padding(horizontal = 6.dp, vertical = 4.dp),
+            .padding(horizontal = 4.dp, vertical = 4.dp),
     ) {
         Icon(icon, label, tint = if (enabled) Ink else Muted, modifier = Modifier.size(18.dp))
         Text(label, color = if (enabled) Muted else Muted.copy(alpha = 0.5f), fontSize = 10.sp)
@@ -462,6 +511,17 @@ private fun EditorSheets(
     spec: EditorWindowSpec,
     onImport: () -> Unit,
 ) {
+    val context = LocalContext.current
+    val exportBrowser = rememberLauncherForActivityResult(
+        ActivityResultContracts.StartActivityForResult(),
+    ) { result ->
+        val uri = result.data?.data ?: return@rememberLauncherForActivityResult
+        val viewVideo = Intent(Intent.ACTION_VIEW).apply {
+            setDataAndType(uri, "video/mp4")
+            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        }
+        runCatching { context.startActivity(viewVideo) }
+    }
     val showLibrary = state.sheet == EditorSheet.Library && spec.useLibrarySheet
     val showInspector = state.sheet == EditorSheet.Inspector && spec.useInspectorSheet
     val showExport = state.sheet == EditorSheet.Export
@@ -493,13 +553,32 @@ private fun EditorSheets(
             onDismissRequest = { if (state.exportProgress == null) vm.closeSheet() },
             containerColor = BgPanel,
         ) {
-            ExportBody(state, vm)
+            ExportBody(
+                state = state,
+                vm = vm,
+                onOpenExportFolder = {
+                    val folderUri = DocumentsContract.buildDocumentUri(
+                        "com.android.externalstorage.documents",
+                        "primary:Movies/FengBroDirector",
+                    )
+                    val browseVideos = Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
+                        addCategory(Intent.CATEGORY_OPENABLE)
+                        type = "video/mp4"
+                        putExtra(DocumentsContract.EXTRA_INITIAL_URI, folderUri)
+                    }
+                    exportBrowser.launch(browseVideos)
+                },
+            )
         }
     }
 }
 
 @Composable
-private fun ExportBody(state: EditorUiState, vm: EditorViewModel) {
+private fun ExportBody(
+    state: EditorUiState,
+    vm: EditorViewModel,
+    onOpenExportFolder: () -> Unit,
+) {
     Column(Modifier.padding(16.dp)) {
         Text("匯出", color = Ink, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
         Text("H.264 MP4。可選浮水印：鋒兄 / Papaya Feng / パパイヤ フェン", color = Muted, fontSize = 12.sp)
@@ -525,6 +604,19 @@ private fun ExportBody(state: EditorUiState, vm: EditorViewModel) {
         }
         state.exportMessage?.let {
             Text(it, color = Ink, fontSize = 13.sp, modifier = Modifier.padding(vertical = 8.dp))
+        }
+        if (state.lastExportAvailable) {
+            OutlinedButton(
+                onClick = onOpenExportFolder,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(48.dp),
+                shape = RoundedCornerShape(8.dp),
+            ) {
+                Icon(Icons.Default.FolderOpen, contentDescription = null)
+                Spacer(Modifier.width(8.dp))
+                Text("開啟匯出資料夾")
+            }
         }
         Spacer(Modifier.height(8.dp))
         Button(

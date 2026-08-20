@@ -20,7 +20,7 @@ object SubtitleFile {
     private val lrcWordAbs = Regex("""<(\d{1,3}):(\d{1,2})(?:[.:](\d{1,3}))?>""")
     private val microDvd = Regex("""^\{(\d+)\}\{(\d+)\}(.*)$""")
     private val samiSync = Regex("""<SYNC\s+Start\s*=\s*"?(\d+)"?\s*>""", RegexOption.IGNORE_CASE)
-    private val overrideBlock = Regex("""\{[^}]*}""")
+    private val overrideBlock = Regex("""\{[^}]*\}""")
     private val htmlTag = Regex("""<[^>]+>""")
 
     fun isSubtitlePath(path: String): Boolean {

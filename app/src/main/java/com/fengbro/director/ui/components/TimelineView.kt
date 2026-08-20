@@ -3,10 +3,12 @@ package com.fengbro.director.ui.components
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -25,6 +27,7 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
@@ -61,9 +64,10 @@ fun TimelineView(
     val scroll = rememberScrollState()
     val contentPx = TimeUtil.timelineContentPixels(workspaceSeconds, pixelsPerSecond)
     val contentDp = with(density) { contentPx.toFloat().toDp() }
+    val headerWidth = 64.dp
 
     LaunchedEffect(playhead, pixelsPerSecond, workspaceSeconds) {
-        val x = TimeUtil.timelineXFromTime(playhead, 0.0, pixelsPerSecond, TimeUtil.TIMELINE_GUTTER)
+        val x = TimeUtil.timelineXFromTime(playhead, 0.0, pixelsPerSecond, gutter = 0.0)
         val view = scroll.viewportSize.toDouble()
         val target = (x - view * 0.45).coerceAtLeast(0.0)
         if (x < scroll.value || x > scroll.value + view - 24) {
@@ -71,16 +75,32 @@ fun TimelineView(
         }
     }
 
-    Column(
+    Row(
         modifier = modifier
             .fillMaxWidth()
-            .background(BgTimeline)
-            .onSizeChanged { onViewportWidth(it.width.toDouble()) },
+            .background(BgTimeline),
     ) {
+        Column(
+            modifier = Modifier
+                .width(headerWidth)
+                .fillMaxHeight()
+                .background(BgPanel2),
+        ) {
+            Box(Modifier.fillMaxWidth().height(28.dp).background(BgPanel2))
+            tracks.forEach { track ->
+                TrackHeader(track = track, onSelect = { onSelect(null, track.id) })
+            }
+        }
         Box(
             modifier = Modifier
-                .fillMaxWidth()
-                .horizontalScroll(scroll),
+                .weight(1f)
+                .fillMaxHeight()
+                .horizontalScroll(scroll)
+                .onSizeChanged {
+                    // Core timeline math reserves its own 72 px gutter. The visible
+                    // track pane is separate now, so report an equivalent viewport.
+                    onViewportWidth(it.width + TimeUtil.TIMELINE_GUTTER)
+                },
         ) {
             Column(modifier = Modifier.width(contentDp)) {
                 Ruler(workspaceSeconds, pixelsPerSecond, onSeek)
@@ -95,16 +115,34 @@ fun TimelineView(
                 }
             }
             val headX = with(density) {
-                TimeUtil.timelineXFromTime(playhead, 0.0, pixelsPerSecond, TimeUtil.TIMELINE_GUTTER).toFloat().toDp()
+                TimeUtil.timelineXFromTime(playhead, 0.0, pixelsPerSecond, gutter = 0.0).toFloat().toDp()
             }
             Box(
                 modifier = Modifier
                     .offset { IntOffset(with(density) { headX.roundToPx() }, 0) }
                     .width(2.dp)
-                    .height((28 + tracks.size * 52).dp)
+                    .height(tracks.fold(28) { total, track ->
+                        total + if (track.kind == TrackKind.Video) 56 else 44
+                    }.dp)
                     .background(Primary),
             )
         }
+    }
+}
+
+@Composable
+private fun TrackHeader(track: TimelineTrack, onSelect: () -> Unit) {
+    val height = if (track.kind == TrackKind.Video) 56.dp else 44.dp
+    Box(
+        modifier = Modifier
+            .fillMaxWidth()
+            .height(height)
+            .background(BgPanel2)
+            .clickable(onClick = onSelect)
+            .padding(horizontal = 8.dp),
+        contentAlignment = Alignment.CenterStart,
+    ) {
+        Text(track.label, color = Muted, fontSize = 11.sp, maxLines = 1)
     }
 }
 
@@ -122,11 +160,10 @@ private fun Ruler(workspaceSeconds: Double, pixelsPerSecond: Double, onSeek: (Do
             .height(28.dp)
             .pointerInput(pixelsPerSecond, workspaceSeconds) {
                 detectTapGestures { offset ->
-                    onSeek(TimeUtil.timeFromTimelineX(offset.x.toDouble(), 0.0, pixelsPerSecond))
+                    onSeek(TimeUtil.timeFromTimelineX(offset.x.toDouble(), 0.0, pixelsPerSecond, gutter = 0.0))
                 }
             },
     ) {
-        val gutter = TimeUtil.TIMELINE_GUTTER.dp.toPx()
         drawRect(BgTimeline)
         var t = 0.0
         while (t <= workspaceSeconds) {
@@ -134,7 +171,7 @@ private fun Ruler(workspaceSeconds: Double, pixelsPerSecond: Double, onSeek: (Do
             drawLine(Line, Offset(x, size.height * 0.45f), Offset(x, size.height), 1f)
             t += step
         }
-        drawLine(Line, Offset(gutter, size.height), Offset(size.width, size.height), 1f)
+        drawLine(Line, Offset.Zero.copy(y = size.height), Offset(size.width, size.height), 1f)
     }
     // labels overlaid as text would need another pass; keep ticks only for density
 }
@@ -152,35 +189,27 @@ private fun TrackLane(
         modifier = Modifier
             .fillMaxWidth()
             .height(height)
+            .testTag("timeline-track-${track.id}")
             .background(BgTimeline)
             .pointerInput(track.id, pixelsPerSecond) {
                 detectTapGestures { offset ->
-                    val time = TimeUtil.timeFromTimelineX(offset.x.toDouble(), 0.0, pixelsPerSecond)
+                    val time = TimeUtil.timeFromTimelineX(offset.x.toDouble(), 0.0, pixelsPerSecond, gutter = 0.0)
                     val hit = track.clips.lastOrNull { time >= it.start && time < it.end }
-                    if (hit != null) onSelect(hit.id, track.id) else {
+                    if (hit != null) {
+                        onSelect(hit.id, track.id)
+                        onSeek(time)
+                    } else {
                         onSelect(null, track.id)
                         onSeek(time)
                     }
                 }
             },
     ) {
-        Box(
-            modifier = Modifier
-                .width(TimeUtil.TIMELINE_GUTTER.dp)
-                .fillMaxHeight()
-                .background(BgPanel2)
-                .padding(horizontal = 8.dp),
-            contentAlignment = Alignment.CenterStart,
-        ) {
-            Text(track.label, color = Muted, fontSize = 11.sp)
-        }
         track.clips.forEach { clip ->
             ClipBlock(
                 clip = clip,
-                track = track,
                 pixelsPerSecond = pixelsPerSecond,
                 selected = clip.id == selectedClipId,
-                onSelect = { onSelect(clip.id, track.id) },
             )
         }
     }
@@ -189,13 +218,11 @@ private fun TrackLane(
 @Composable
 private fun ClipBlock(
     clip: TimelineClip,
-    track: TimelineTrack,
     pixelsPerSecond: Double,
     selected: Boolean,
-    onSelect: () -> Unit,
 ) {
     val density = LocalDensity.current
-    val x = TimeUtil.timelineXFromTime(clip.start, 0.0, pixelsPerSecond)
+    val x = TimeUtil.timelineXFromTime(clip.start, 0.0, pixelsPerSecond, gutter = 0.0)
     val w = (clip.duration * pixelsPerSecond).coerceAtLeast(8.0)
     val color = when (clip.kind) {
         ClipKind.Subtitle, ClipKind.Title -> SubtitleClip
@@ -213,9 +240,6 @@ private fun ClipBlock(
             .clip(RoundedCornerShape(6.dp))
             .background(if (selected) color.copy(alpha = 1f) else color.copy(alpha = 0.88f))
             .then(if (selected) Modifier.border(1.5.dp, Primary, RoundedCornerShape(6.dp)) else Modifier)
-            .pointerInput(clip.id) {
-                detectTapGestures { onSelect() }
-            }
             .padding(horizontal = 6.dp),
         contentAlignment = Alignment.CenterStart,
     ) {

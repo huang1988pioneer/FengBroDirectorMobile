@@ -74,6 +74,7 @@ data class EditorUiState(
     val sheet: EditorSheet = EditorSheet.None,
     val exportProgress: Float? = null,
     val exportMessage: String? = null,
+    val lastExportAvailable: Boolean = false,
     val recents: List<RecentProject> = emptyList(),
     val clock: String = "00:00.00  /  00:00.00",
     val generation: Int = 0,
@@ -380,7 +381,14 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         val name = "鋒兄導演-$stamp.mp4"
         val req = ExportRequest(width = w, height = h, frameRate = session.project.frameRate, target = target)
         val plan = ExportPlan.from(session.project, req)
-        _ui.update { it.copy(exportProgress = 0f, exportMessage = "正在匯出…", sheet = EditorSheet.Export) }
+        _ui.update {
+            it.copy(
+                exportProgress = 0f,
+                exportMessage = "正在匯出…",
+                lastExportAvailable = false,
+                sheet = EditorSheet.Export,
+            )
+        }
         pause()
         viewModelScope.launch {
             try {
@@ -394,6 +402,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                     it.copy(
                         exportProgress = 1f,
                         exportMessage = where,
+                        lastExportAvailable = true,
                         status = session.statusText,
                     )
                 }
@@ -403,6 +412,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                     it.copy(
                         exportProgress = null,
                         exportMessage = session.statusText,
+                        lastExportAvailable = false,
                         status = session.statusText,
                     )
                 }
