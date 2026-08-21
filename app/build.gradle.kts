@@ -7,7 +7,7 @@ plugins {
 
 android {
     namespace = "com.fengbro.director"
-    compileSdk = 35
+    compileSdk = 36
 
     defaultConfig {
         applicationId = "com.fengbro.director"

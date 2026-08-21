@@ -6,7 +6,6 @@ import android.view.ViewGroup
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
@@ -65,12 +64,9 @@ import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.vector.ImageVector
-import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
@@ -318,69 +314,23 @@ private fun PreviewPane(vm: EditorViewModel, state: EditorUiState, modifier: Mod
                 .clickable { vm.togglePlay() },
             contentAlignment = Alignment.Center,
         ) {
-            if (state.previewIsImage && state.previewImagePath != null) {
-                val bmp = rememberPreviewBitmap(state.previewImagePath)
-                if (bmp != null) {
-                    Image(bmp, null, Modifier.fillMaxSize(), contentScale = ContentScale.Fit)
-                }
-            } else {
-                AndroidView(
-                    factory = { ctx ->
-                        PlayerView(ctx).apply {
-                            player = vm.player
-                            useController = false
-                            layoutParams = ViewGroup.LayoutParams(
-                                ViewGroup.LayoutParams.MATCH_PARENT,
-                                ViewGroup.LayoutParams.MATCH_PARENT,
-                            )
-                        }
-                    },
-                    update = { it.player = vm.player },
-                    modifier = Modifier.fillMaxSize(),
-                )
-            }
-            if (state.overlay.text.isNotBlank()) OverlayCaption(state.overlay)
+            AndroidView(
+                factory = { ctx ->
+                    PlayerView(ctx).apply {
+                        player = vm.player
+                        useController = false
+                        layoutParams = ViewGroup.LayoutParams(
+                            ViewGroup.LayoutParams.MATCH_PARENT,
+                            ViewGroup.LayoutParams.MATCH_PARENT,
+                        )
+                    }
+                },
+                update = { it.player = vm.player },
+                modifier = Modifier.fillMaxSize(),
+            )
             if (!state.hasClips) {
                 Text("匯入媒體，再放到時間軸", color = Muted, fontSize = 14.sp)
             }
-        }
-    }
-}
-
-@Composable
-private fun rememberPreviewBitmap(path: String) = androidx.compose.runtime.remember(path) {
-    android.graphics.BitmapFactory.decodeFile(path)?.asImageBitmap()
-}
-
-@Composable
-private fun OverlayCaption(overlay: OverlayState) {
-    Box(Modifier.fillMaxSize(), contentAlignment = if (overlay.caption) Alignment.BottomCenter else Alignment.Center) {
-        val shape = RoundedCornerShape(8.dp)
-        if (overlay.karaoke.isNotEmpty()) {
-            Row(
-                Modifier
-                    .padding(bottom = if (overlay.caption) 28.dp else 0.dp)
-                    .clip(shape)
-                    .background(androidx.compose.ui.graphics.Color(0x99000000))
-                    .padding(horizontal = 12.dp, vertical = 6.dp),
-            ) {
-                overlay.karaoke.forEach { (word, on) ->
-                    Text(word, color = if (on) Primary else Ink, fontSize = 20.sp, fontWeight = FontWeight.SemiBold)
-                }
-            }
-        } else {
-            Text(
-                overlay.text,
-                color = Ink,
-                fontSize = 20.sp,
-                fontWeight = FontWeight.SemiBold,
-                textAlign = TextAlign.Center,
-                modifier = Modifier
-                    .padding(bottom = if (overlay.caption) 28.dp else 0.dp)
-                    .clip(shape)
-                    .background(androidx.compose.ui.graphics.Color(0x99000000))
-                    .padding(horizontal = 12.dp, vertical = 6.dp),
-            )
         }
     }
 }

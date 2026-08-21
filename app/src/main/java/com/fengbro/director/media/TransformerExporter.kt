@@ -2,38 +2,27 @@ package com.fengbro.director.media
 
 import android.content.ContentValues
 import android.content.Context
-import android.graphics.Bitmap
-import android.graphics.Canvas
-import android.graphics.Color
 import android.net.Uri
 import android.os.Build
 import android.os.Environment
 import android.provider.MediaStore
-import androidx.media3.common.MediaItem
 import androidx.media3.common.MimeTypes
 import androidx.media3.common.util.UnstableApi
-import androidx.media3.effect.OverlayEffect
-import androidx.media3.effect.Presentation
-import androidx.media3.effect.ScaleAndRotateTransformation
 import androidx.media3.transformer.Composition
 import androidx.media3.transformer.ProgressHolder
-import androidx.media3.transformer.EditedMediaItem
-import androidx.media3.transformer.EditedMediaItemSequence
-import androidx.media3.transformer.Effects
 import androidx.media3.transformer.ExportException
 import androidx.media3.transformer.ExportResult
 import androidx.media3.transformer.Transformer
-import com.fengbro.director.core.export.AudioSegment
 import com.fengbro.director.core.export.ExportPlan
-import com.fengbro.director.core.export.VisualSegment
 import kotlinx.coroutines.suspendCancellableCoroutine
 import java.io.File
 import kotlin.coroutines.resume
-import kotlin.math.max
-import kotlin.math.roundToLong
 
 @UnstableApi
-class TransformerExporter(private val context: Context) {
+class TransformerExporter(
+    private val context: Context,
+    private val compositions: MediaCompositionFactory = MediaCompositionFactory(context),
+) {
     data class Result(val file: File, val galleryUri: Uri?)
 
     suspend fun export(
@@ -45,27 +34,7 @@ class TransformerExporter(private val context: Context) {
         val outFile = File(outDir, suggestedName)
         if (outFile.exists()) outFile.delete()
 
-        val black = ensureBlackFrame(plan.width, plan.height)
-        val videoItems = buildVideoItems(plan, black)
-        val audioItems = buildAudioItems(plan, black)
-        val overlay = TimelineOverlay(plan)
-        val presentation = Presentation.createForWidthAndHeight(
-            plan.width,
-            plan.height,
-            Presentation.LAYOUT_SCALE_TO_FIT,
-        )
-
-        val sequences = buildList {
-            add(EditedMediaItemSequence(videoItems))
-            if (audioItems.isNotEmpty()) add(EditedMediaItemSequence(audioItems))
-        }
-        val videoEffects = listOf(
-            OverlayEffect(listOf(overlay)),
-            presentation,
-        )
-        val composition = Composition.Builder(sequences)
-            .setEffects(Effects(emptyList(), videoEffects))
-            .build()
+        val composition = compositions.build(plan)
 
         suspendCancellableCoroutine { cont ->
             val transformer = Transformer.Builder(context)
@@ -129,133 +98,6 @@ class TransformerExporter(private val context: Context) {
         onProgress(1f)
         val gallery = publishToGallery(outFile, suggestedName)
         return Result(outFile, gallery)
-    }
-
-    private fun buildVideoItems(plan: ExportPlan, black: File): List<EditedMediaItem> {
-        val items = mutableListOf<EditedMediaItem>()
-        val visuals = plan.visuals.sortedBy { it.start }
-        var cursor = 0.0
-        for (seg in visuals) {
-            if (seg.start > cursor + 0.04) {
-                items.add(colorHold(black, seg.start - cursor, plan.frameRate))
-            }
-            val path = seg.path
-            if (path.isNullOrBlank() || !File(path).exists()) {
-                items.add(colorHold(black, max(0.05, seg.duration), plan.frameRate))
-            } else {
-                items.add(visualItem(seg, plan.frameRate))
-            }
-            cursor = max(cursor, seg.start + seg.duration)
-        }
-        if (cursor < plan.durationSec - 0.04) {
-            items.add(colorHold(black, plan.durationSec - cursor, plan.frameRate))
-        }
-        if (items.isEmpty()) {
-            items.add(colorHold(black, plan.durationSec, plan.frameRate))
-        }
-        return items
-    }
-
-    private fun buildAudioItems(plan: ExportPlan, black: File): List<EditedMediaItem> {
-        val audios = plan.audios.filter { !it.path.isNullOrBlank() && File(it.path!!).exists() }
-            .sortedBy { it.start }
-        if (audios.isEmpty()) return emptyList()
-        val items = mutableListOf<EditedMediaItem>()
-        var cursor = 0.0
-        for (seg in audios) {
-            if (seg.start > cursor + 0.04) {
-                items.add(silenceHold(black, seg.start - cursor))
-            }
-            items.add(audioItem(seg))
-            cursor = max(cursor, seg.start + seg.duration)
-        }
-        if (cursor < plan.durationSec - 0.04) {
-            items.add(silenceHold(black, plan.durationSec - cursor))
-        }
-        return items
-    }
-
-    private fun visualItem(seg: VisualSegment, frameRate: Double): EditedMediaItem {
-        val durationUs = (max(0.05, seg.duration) * 1_000_000).roundToLong()
-        val media = if (seg.isImage) {
-            MediaItem.fromUri(Uri.fromFile(File(seg.path!!)))
-        } else {
-            val startMs = (seg.inPoint * 1000).roundToLong().coerceAtLeast(0)
-            val endMs = startMs + (max(0.05, seg.duration * max(0.05, seg.speed)) * 1000).roundToLong()
-            MediaItem.Builder()
-                .setUri(Uri.fromFile(File(seg.path!!)))
-                .setClippingConfiguration(
-                    MediaItem.ClippingConfiguration.Builder()
-                        .setStartPositionMs(startMs)
-                        .setEndPositionMs(endMs)
-                        .build(),
-                )
-                .build()
-        }
-        val effects = mutableListOf<androidx.media3.common.Effect>()
-        if (seg.flipH || seg.flipV || kotlin.math.abs(seg.rotation) > 0.1) {
-            val scaleX = if (seg.flipH) -1f else 1f
-            val scaleY = if (seg.flipV) -1f else 1f
-            effects.add(
-                ScaleAndRotateTransformation.Builder()
-                    .setScale(scaleX * seg.scale.toFloat().coerceAtLeast(0.05f), scaleY * seg.scale.toFloat().coerceAtLeast(0.05f))
-                    .setRotationDegrees(seg.rotation.toFloat())
-                    .build(),
-            )
-        }
-        val builder = EditedMediaItem.Builder(media)
-            .setDurationUs(durationUs)
-            .setRemoveAudio(true)
-            .setEffects(Effects(emptyList(), effects))
-        if (seg.isImage) builder.setFrameRate(frameRate.toInt().coerceAtLeast(1))
-        return builder.build()
-    }
-
-    private fun audioItem(seg: AudioSegment): EditedMediaItem {
-        val durationUs = (max(0.05, seg.duration) * 1_000_000).roundToLong()
-        val startMs = (seg.inPoint * 1000).roundToLong().coerceAtLeast(0)
-        val endMs = startMs + (max(0.05, seg.duration * max(0.05, seg.speed)) * 1000).roundToLong()
-        val media = MediaItem.Builder()
-            .setUri(Uri.fromFile(File(seg.path!!)))
-            .setClippingConfiguration(
-                MediaItem.ClippingConfiguration.Builder()
-                    .setStartPositionMs(startMs)
-                    .setEndPositionMs(endMs)
-                    .build(),
-            )
-            .build()
-        return EditedMediaItem.Builder(media)
-            .setDurationUs(durationUs)
-            .setRemoveVideo(true)
-            .build()
-    }
-
-    private fun colorHold(black: File, seconds: Double, frameRate: Double): EditedMediaItem {
-        val durationUs = (max(0.05, seconds) * 1_000_000).roundToLong()
-        return EditedMediaItem.Builder(MediaItem.fromUri(Uri.fromFile(black)))
-            .setDurationUs(durationUs)
-            .setFrameRate(frameRate.toInt().coerceAtLeast(1))
-            .setRemoveAudio(true)
-            .build()
-    }
-
-    private fun silenceHold(black: File, seconds: Double): EditedMediaItem {
-        val durationUs = (max(0.05, seconds) * 1_000_000).roundToLong()
-        return EditedMediaItem.Builder(MediaItem.fromUri(Uri.fromFile(black)))
-            .setDurationUs(durationUs)
-            .setFrameRate(30)
-            .setRemoveVideo(true)
-            .build()
-    }
-
-    private fun ensureBlackFrame(width: Int, height: Int): File {
-        val file = File(context.cacheDir, "black_${width}x$height.png")
-        if (file.exists()) return file
-        val bmp = Bitmap.createBitmap(width.coerceAtLeast(2), height.coerceAtLeast(2), Bitmap.Config.ARGB_8888)
-        Canvas(bmp).drawColor(Color.BLACK)
-        file.outputStream().use { bmp.compress(Bitmap.CompressFormat.PNG, 100, it) }
-        bmp.recycle()
-        return file
     }
 
     private fun publishToGallery(file: File, name: String): Uri? {

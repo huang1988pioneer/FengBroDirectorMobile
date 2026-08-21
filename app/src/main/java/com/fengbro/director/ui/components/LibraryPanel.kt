@@ -1,7 +1,10 @@
 package com.fengbro.director.ui.components
 
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.detectDragGesturesAfterLongPress
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -21,17 +24,40 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.FilterChipDefaults
+import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.AudioFile
+import androidx.compose.material.icons.filled.ClosedCaption
+import androidx.compose.material.icons.filled.DragIndicator
+import androidx.compose.material.icons.filled.Image as ImageIcon
+import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalHapticFeedback
+import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
+import androidx.compose.ui.zIndex
 import com.fengbro.director.core.model.MediaItem
 import com.fengbro.director.core.model.MediaKind
 import com.fengbro.director.core.time.TimeUtil
@@ -104,6 +130,8 @@ fun LibraryPanel(
                 }
             }
         } else {
+            Text("點一下或長按拖曳，加入播放頭位置", color = Muted, fontSize = 10.sp)
+            Spacer(Modifier.height(6.dp))
             LazyVerticalGrid(
                 columns = GridCells.Adaptive(if (compact) 140.dp else 120.dp),
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
@@ -113,7 +141,10 @@ fun LibraryPanel(
                 items(state.visibleMedia, key = { it.id }) { item ->
                     MediaCard(
                         item = item,
-                        onPlace = { vm.placeMedia(item.id) },
+                        onPlace = {
+                            vm.placeMedia(item.id)
+                            if (compact) vm.closeSheet()
+                        },
                         onRemove = { vm.removeLibrary(item.id) },
                     )
                 }
@@ -156,11 +187,56 @@ fun MediaCard(item: MediaItem, onPlace: () -> Unit, onRemove: () -> Unit) {
         MediaKind.Subtitle -> "字幕"
         else -> "影片"
     }
+    var dragging by remember(item.id) { mutableStateOf(false) }
+    var dragOffset by remember(item.id) { mutableStateOf(Offset.Zero) }
+    val dragThreshold = with(LocalDensity.current) { 36.dp.toPx() }
+    val haptics = LocalHapticFeedback.current
+    val thumbnail = remember(item.thumbPath) {
+        item.thumbPath?.let { android.graphics.BitmapFactory.decodeFile(it) }?.asImageBitmap()
+    }
     Column(
         modifier = Modifier
             .fillMaxWidth()
+            .testTag("media-card-${item.id}")
+            .semantics { contentDescription = "${item.name}，$kind，點一下或長按拖曳到時間軸" }
+            .zIndex(if (dragging) 2f else 0f)
+            .graphicsLayer {
+                translationX = dragOffset.x
+                translationY = dragOffset.y
+                scaleX = if (dragging) 1.03f else 1f
+                scaleY = if (dragging) 1.03f else 1f
+                alpha = if (dragging) 0.92f else 1f
+            }
             .clip(RoundedCornerShape(8.dp))
             .background(BgPanel2)
+            .border(
+                width = if (dragging) 2.dp else 1.dp,
+                color = if (dragging) Primary else Line,
+                shape = RoundedCornerShape(8.dp),
+            )
+            .pointerInput(item.id, dragThreshold) {
+                detectDragGesturesAfterLongPress(
+                    onDragStart = {
+                        dragging = true
+                        dragOffset = Offset.Zero
+                        haptics.performHapticFeedback(HapticFeedbackType.LongPress)
+                    },
+                    onDrag = { change, amount ->
+                        change.consume()
+                        dragOffset += amount
+                    },
+                    onDragEnd = {
+                        val shouldPlace = dragOffset.getDistance() >= dragThreshold
+                        dragging = false
+                        dragOffset = Offset.Zero
+                        if (shouldPlace) onPlace()
+                    },
+                    onDragCancel = {
+                        dragging = false
+                        dragOffset = Offset.Zero
+                    },
+                )
+            }
             .clickable(onClick = onPlace)
             .padding(8.dp),
     ) {
@@ -172,15 +248,46 @@ fun MediaCard(item: MediaItem, onPlace: () -> Unit, onRemove: () -> Unit) {
                 .background(kindTint(item.kind)),
             contentAlignment = Alignment.Center,
         ) {
-            Text(kind, color = Ink, fontSize = 12.sp)
+            if (thumbnail != null) {
+                Image(
+                    bitmap = thumbnail,
+                    contentDescription = "$kind：${item.name}",
+                    contentScale = ContentScale.Crop,
+                    modifier = Modifier.fillMaxSize(),
+                )
+                if (item.kind == MediaKind.Video) {
+                    Box(
+                        modifier = Modifier
+                            .size(30.dp)
+                            .clip(RoundedCornerShape(15.dp))
+                            .background(androidx.compose.ui.graphics.Color(0x99000000)),
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        Icon(Icons.Default.PlayArrow, contentDescription = null, tint = Ink, modifier = Modifier.size(20.dp))
+                    }
+                }
+            } else {
+                Icon(
+                    imageVector = when (item.kind) {
+                        MediaKind.Image -> Icons.Default.ImageIcon
+                        MediaKind.Audio -> Icons.Default.AudioFile
+                        MediaKind.Subtitle -> Icons.Default.ClosedCaption
+                        else -> Icons.Default.PlayArrow
+                    },
+                    contentDescription = null,
+                    tint = Ink,
+                )
+            }
         }
         Spacer(Modifier.height(6.dp))
         Text(item.name, color = Ink, fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
         Text("$kind · ${TimeUtil.formatClock(item.duration)}", color = Muted, fontSize = 11.sp, maxLines = 1)
-        Row {
+        Row(verticalAlignment = Alignment.CenterVertically) {
             Text("放到時間軸", color = Primary, fontSize = 11.sp, modifier = Modifier.clickable(onClick = onPlace))
             Spacer(Modifier.width(10.dp))
             Text("移除", color = Muted, fontSize = 11.sp, modifier = Modifier.clickable(onClick = onRemove))
+            Spacer(Modifier.weight(1f))
+            Icon(Icons.Default.DragIndicator, contentDescription = "長按拖曳", tint = Muted, modifier = Modifier.size(18.dp))
         }
     }
 }
