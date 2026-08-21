@@ -12,6 +12,8 @@ import com.fengbro.director.core.subtitle.SubtitleFile
 import java.io.File
 
 class MediaImporter(private val context: Context) {
+    private val thumbnailer = MediaThumbnailer(context)
+
     fun importUris(uris: List<Uri>): List<MediaItem> = uris.mapNotNull { importUri(it) }
 
     fun importUri(uri: Uri): MediaItem? {
@@ -47,8 +49,11 @@ class MediaImporter(private val context: Context) {
             MediaKind.Image -> probeImage(item)
             else -> probeAv(item)
         }
+        thumbnailer.ensure(item)
         return item
     }
+
+    fun ensureThumbnail(item: MediaItem): Boolean = thumbnailer.ensure(item) != null
 
     private fun probeImage(item: MediaItem) {
         item.hasVideo = false
