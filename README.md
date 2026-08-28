@@ -40,8 +40,8 @@ Android 版剪輯軟體，移植自桌面 [鋒兄導演](https://github.com/huan
 | 項目 | 桌面（Avalonia） | Android（本專案） |
 |------|------------------|-------------------|
 | UI | 三欄加底軸 | 上預覽、下時間軸、工作表 |
-| 預覽 | LibVLC | Media3 ExoPlayer |
-| 匯出 | 本機 ffmpeg | Media3 Transformer |
+| 預覽 | LibVLC | Media3 CompositionPlayer |
+| 匯出 | 本機 ffmpeg | Media3 Transformer（與預覽共用 Composition） |
 | 檔案 | 原生路徑 + 拖放 | Storage Access Framework，複製進 App 目錄 |
 | 進階濾鏡 | ffmpeg filtergraph | 預覽／匯出先做翻轉、旋轉、字幕與浮水印 |
 
@@ -54,7 +54,7 @@ Android 版剪輯軟體，移植自桌面 [鋒兄導演](https://github.com/huan
 需求：
 
 - JDK 17+
-- Android SDK（compileSdk 35）
+- Android SDK（compileSdk 36、targetSdk 35）
 - Android Studio 或命令列 Gradle
 
 ```bash

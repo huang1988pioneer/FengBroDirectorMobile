@@ -1,15 +1,13 @@
 package com.fengbro.director.ui
 
 import android.app.Application
-import android.graphics.BitmapFactory
 import android.net.Uri
 import androidx.annotation.OptIn
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
-import androidx.media3.common.MediaItem
 import androidx.media3.common.Player
+import androidx.media3.common.util.ExperimentalApi
 import androidx.media3.common.util.UnstableApi
-import androidx.media3.exoplayer.ExoPlayer
 import com.fengbro.director.core.export.ExportPlan
 import com.fengbro.director.core.export.ExportRequest
 import com.fengbro.director.core.model.ExportTarget
@@ -23,14 +21,18 @@ import com.fengbro.director.core.store.RecentStore
 import com.fengbro.director.core.time.TimeUtil
 import com.fengbro.director.core.timeline.EditorSession
 import com.fengbro.director.media.MediaImporter
+import com.fengbro.director.media.CompositionPreview
+import com.fengbro.director.media.MediaCompositionFactory
 import com.fengbro.director.media.TransformerExporter
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.io.File
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -42,12 +44,6 @@ enum class EditorSheet { Library, Inspector, Export, None }
 enum class WorkspaceMode { Startup, Editor }
 
 enum class LibraryFilter { All, Video, Audio, Subtitle }
-
-data class OverlayState(
-    val text: String = "",
-    val caption: Boolean = true,
-    val karaoke: List<Pair<String, Boolean>> = emptyList(),
-)
 
 data class EditorUiState(
     val projectName: String = "未命名專案",
@@ -61,9 +57,6 @@ data class EditorUiState(
     val selectedClipId: String? = null,
     val selectedTrackId: String? = null,
     val selectedClip: TimelineClip? = null,
-    val overlay: OverlayState = OverlayState(),
-    val previewImagePath: String? = null,
-    val previewIsImage: Boolean = false,
     val watermark: Boolean = false,
     val width: Int = 1920,
     val height: Int = 1080,
@@ -83,24 +76,23 @@ data class EditorUiState(
     val visibleMedia: List<com.fengbro.director.core.model.MediaItem> = emptyList(),
 )
 
-@OptIn(UnstableApi::class)
+@OptIn(markerClass = [UnstableApi::class, ExperimentalApi::class])
 class EditorViewModel(app: Application) : AndroidViewModel(app) {
     private val session = EditorSession()
     private val importer = MediaImporter(app)
-    private val exporter = TransformerExporter(app)
+    private val compositions = MediaCompositionFactory(app)
+    private val preview = CompositionPreview(app, compositions)
+    private val exporter = TransformerExporter(app, compositions)
     private val recentFile = File(app.filesDir, "recents.json")
     private val autosaveFile = File(app.filesDir, "autosave.fbdproj")
 
-    val player: ExoPlayer = ExoPlayer.Builder(app).build().apply {
-        repeatMode = Player.REPEAT_MODE_OFF
-        volume = 1f
-    }
+    val player: Player = preview.player
 
     private val _ui = MutableStateFlow(EditorUiState())
     val ui: StateFlow<EditorUiState> = _ui
 
     private var playJob: Job? = null
-    private var boundClipId: String? = null
+    private var compositionDirty = true
     private var generation = 0
     private var mode = WorkspaceMode.Startup
     private var libraryFilter = LibraryFilter.All
@@ -117,11 +109,13 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         }
         publish()
         refreshRecents()
+        if (session.hasClips) syncPreview(rebuild = true)
+        refreshMissingThumbnails()
     }
 
     fun importUris(uris: List<Uri>) {
         viewModelScope.launch {
-            val items = importer.importUris(uris)
+            val items = withContext(Dispatchers.IO) { importer.importUris(uris) }
             if (items.isEmpty()) {
                 session.statusText = "沒有匯入任何檔案。"
                 publish()
@@ -139,13 +133,14 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         val item = session.project.media.firstOrNull { it.id == id } ?: return
         session.placeMedia(item, null, time)
         publish()
-        syncPreview(force = true)
+        compositionChanged()
         autosave()
     }
 
     fun addSubtitle() {
         session.addSubtitleAtPlayhead()
         publish()
+        compositionChanged()
         autosave()
     }
 
@@ -154,7 +149,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         val clip = track?.clips?.firstOrNull { it.id == clipId }
         session.selectClip(clip, track)
         publish()
-        syncPreview(force = true)
+        syncPreview(rebuild = false)
     }
 
     fun seek(time: Double, fromUser: Boolean = true) {
@@ -163,7 +158,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
             pause()
         }
         publish()
-        syncPreview(force = fromUser)
+        if (fromUser) syncPreview(rebuild = false)
     }
 
     fun togglePlay() {
@@ -178,16 +173,13 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         }
         if (session.playhead >= session.duration - 0.05) session.seek(0.0)
         _ui.update { it.copy(playing = true) }
-        syncPreview(force = true)
+        syncPreview(rebuild = compositionDirty)
+        preview.play()
         playJob?.cancel()
         playJob = viewModelScope.launch {
-            var last = System.nanoTime()
             while (isActive && _ui.value.playing) {
                 delay(33)
-                val now = System.nanoTime()
-                val dt = (now - last) / 1_000_000_000.0
-                last = now
-                val next = session.playhead + dt
+                val next = preview.currentPositionSeconds
                 if (next >= max(session.duration, 0.05)) {
                     session.seek(session.duration)
                     pause()
@@ -195,16 +187,14 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                 }
                 session.seek(next)
                 publish()
-                syncPreview(force = false)
             }
         }
-        player.play()
     }
 
     fun pause() {
         playJob?.cancel()
         playJob = null
-        player.pause()
+        preview.pause()
         _ui.update { it.copy(playing = false) }
         publish()
     }
@@ -212,33 +202,35 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
     fun split() {
         session.splitAtPlayhead()
         publish()
+        compositionChanged()
         autosave()
     }
 
     fun deleteSelected() {
         session.deleteSelected()
         publish()
-        syncPreview(force = true)
+        compositionChanged()
         autosave()
     }
 
     fun duplicate() {
         session.duplicateSelected()
         publish()
+        compositionChanged()
         autosave()
     }
 
     fun undo() {
         session.undo()
         publish()
-        syncPreview(force = true)
+        compositionChanged()
         autosave()
     }
 
     fun redo() {
         session.redo()
         publish()
-        syncPreview(force = true)
+        compositionChanged()
         autosave()
     }
 
@@ -247,6 +239,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         val track = session.selectedTrack ?: return
         session.moveClip(clip, track, track, (clip.start + delta).coerceAtLeast(0.0))
         publish()
+        compositionChanged()
         autosave()
     }
 
@@ -255,12 +248,14 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
             .firstOrNull { it.id == clipId } ?: return
         session.trimClip(clip, newStart, newDuration, left)
         publish()
+        compositionChanged()
         autosave()
     }
 
     fun setWatermark(on: Boolean) {
         session.includeWatermark = on
         publish()
+        compositionChanged()
         autosave()
     }
 
@@ -268,6 +263,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         val (w, h) = ExportPlan.preset(target)
         session.applyAspect(w, h)
         publish()
+        compositionChanged()
         autosave()
     }
 
@@ -278,6 +274,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         clip.name = text.lineSequence().firstOrNull { it.isNotBlank() }?.take(24) ?: clip.name
         session.project.isDirty = true
         publish()
+        compositionChanged()
         autosave()
     }
 
@@ -285,6 +282,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         val clip = session.selectedClip ?: return
         session.trimClip(clip, clip.start, duration, left = false)
         publish()
+        compositionChanged()
         autosave()
     }
 
@@ -308,9 +306,8 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
     fun newProject() {
         pause()
         session.newProject()
-        boundClipId = null
-        player.stop()
-        player.clearMediaItems()
+        compositionDirty = true
+        preview.stop()
         mode = WorkspaceMode.Editor
         publish()
         autosave()
@@ -321,9 +318,8 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         session.newProject(name.ifBlank { "未命名專案" })
         val (w, h) = ExportPlan.preset(target)
         session.applyAspect(w, h)
-        boundClipId = null
-        player.stop()
-        player.clearMediaItems()
+        compositionDirty = true
+        preview.stop()
         mode = WorkspaceMode.Editor
         session.statusText = "新專案已開好。匯入媒體，再放到時間軸。"
         publish()
@@ -363,11 +359,11 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
             session.loadProject(path)
             RecentStore.touch(recentFile, path, session.project.name)
             refreshRecents()
-            boundClipId = null
-            player.stop()
+            compositionDirty = true
+            preview.stop()
             mode = WorkspaceMode.Editor
             publish()
-            syncPreview(force = true)
+            syncPreview(rebuild = true)
         }.onFailure {
             session.statusText = "這本打不開。"
             publish()
@@ -377,6 +373,8 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
     fun export(target: ExportTarget) {
         val (w, h) = ExportPlan.preset(target)
         session.applyAspect(w, h)
+        compositionDirty = true
+        publish()
         val stamp = SimpleDateFormat("yyyyMMdd-HHmmss", Locale.US).format(Date())
         val name = "鋒兄導演-$stamp.mp4"
         val req = ExportRequest(width = w, height = h, frameRate = session.project.frameRate, target = target)
@@ -426,56 +424,39 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
 
     fun removeLibrary(id: String) {
         val item = session.project.media.firstOrNull { it.id == id } ?: return
+        item.thumbPath?.takeIf { it != item.path }?.let { runCatching { File(it).delete() } }
         session.removeLibraryItem(item)
         publish()
+        compositionChanged()
         autosave()
     }
 
-    private fun syncPreview(force: Boolean) {
-        val (clip, media) = session.clipAtPlayhead()
-        val overlayClip = session.overlayAtPlayhead()
-        val overlay = if (overlayClip != null) {
-            OverlayState(
-                text = overlayClip.text.ifBlank { overlayClip.name },
-                caption = EditorSession.isBottomCaption(overlayClip),
-                karaoke = session.karaokeSpans(overlayClip, session.playhead),
+    private fun compositionChanged() {
+        compositionDirty = true
+        syncPreview(rebuild = true)
+    }
+
+    private fun syncPreview(rebuild: Boolean) {
+        if (!session.hasClips) {
+            preview.stop()
+            return
+        }
+        if (rebuild || compositionDirty) {
+            val request = ExportRequest(
+                width = session.project.width,
+                height = session.project.height,
+                frameRate = session.project.frameRate,
+                target = ExportTarget.Custom,
             )
-        } else OverlayState()
-
-        if (clip == null || media == null) {
-            boundClipId = null
-            if (player.isPlaying) player.pause()
-            _ui.update { it.copy(overlay = overlay, previewImagePath = null, previewIsImage = false) }
-            return
+            preview.load(
+                ExportPlan.from(session.project, request),
+                positionSeconds = session.playhead,
+                playWhenReady = _ui.value.playing,
+            )
+            compositionDirty = false
+        } else {
+            preview.seek(session.playhead)
         }
-
-        if (media.kind == MediaKind.Image) {
-            boundClipId = clip.id
-            if (player.isPlaying) player.pause()
-            _ui.update {
-                it.copy(
-                    overlay = overlay,
-                    previewImagePath = media.path,
-                    previewIsImage = true,
-                )
-            }
-            return
-        }
-
-        val local = ((session.playhead - clip.start) * clip.speed + clip.inPoint).coerceAtLeast(0.0)
-        if (force || boundClipId != clip.id) {
-            boundClipId = clip.id
-            val file = File(media.path)
-            if (file.exists()) {
-                player.setMediaItem(MediaItem.fromUri(Uri.fromFile(file)))
-                player.prepare()
-                player.seekTo((local * 1000).toLong())
-                if (_ui.value.playing) player.play() else player.pause()
-            }
-        } else if (force) {
-            player.seekTo((local * 1000).toLong())
-        }
-        _ui.update { it.copy(overlay = overlay, previewImagePath = null, previewIsImage = false) }
     }
 
     private fun publish() {
@@ -520,6 +501,23 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         runCatching { ProjectStore.save(session.project, autosaveFile.absolutePath) }
     }
 
+    private fun refreshMissingThumbnails() {
+        val missing = session.project.media.filter {
+            (it.kind == MediaKind.Video || it.kind == MediaKind.Image) &&
+                (it.thumbPath.isNullOrBlank() || it.thumbPath?.let(::File)?.isFile != true)
+        }
+        if (missing.isEmpty()) return
+        viewModelScope.launch {
+            val changed = withContext(Dispatchers.IO) {
+                missing.count { importer.ensureThumbnail(it) }
+            }
+            if (changed > 0) {
+                publish()
+                autosave()
+            }
+        }
+    }
+
     private fun refreshRecents() {
         _ui.update { it.copy(recents = RecentStore.load(recentFile)) }
     }
@@ -529,7 +527,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
 
     override fun onCleared() {
         playJob?.cancel()
-        player.release()
+        preview.release()
         super.onCleared()
     }
 }
